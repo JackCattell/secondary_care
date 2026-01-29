@@ -24,9 +24,9 @@ discountRate <- 0.035
 amb_callout <- function(type= "intervention") {
 
   if (type=="intervention") {
-    rbeta(1, 17, 153) ## add real 
-  } else (
     rbeta(1, 10, 160) ## add real 
+  } else (
+    rbeta(1, 17, 153) ## add real 
   )
   
 }
@@ -36,9 +36,9 @@ amb_callout <- function(type= "intervention") {
 amb_conveyance <- function(type= "intervention") {
   
   if (type=="intervention") {
-    rbeta(1, 17, 153) ## add real 
-  } else (
     rbeta(1, 10, 160) ## add real 
+  } else (
+    rbeta(1, 17, 153) ## add real 
   )
   
 }
@@ -48,10 +48,11 @@ amb_conveyance <- function(type= "intervention") {
 ae_use <- function(type= "intervention") {
   
   if (type=="intervention") {
-    rbeta(1, 17, 153) ## add real 
-  } else (
     rbeta(1, 10, 160) ## add real 
+  } else (
+    rbeta(1, 17, 153) ## add real 
   )
+  
   
 }
 
@@ -60,9 +61,9 @@ ae_use <- function(type= "intervention") {
 hospital_admit <- function(type= "intervention") {
   
   if (type=="intervention") {
-    rbeta(1, 17, 153) ## add real 
-  } else (
     rbeta(1, 10, 160) ## add real 
+  } else (
+    rbeta(1, 17, 153) ## add real 
   )
   
 }
@@ -108,7 +109,7 @@ tempres_los <- function(type="intervention") {
 ## costs
 
 setupCost <- function() {
-  1000 #add correct
+  50 #add correct
 }
 monthlyCost <- function() {
   
@@ -322,4 +323,7 @@ names(costs) <- c("sample", "year", "patient", "step", "intervention_cost", "int
 costsAggregate <- costs %>%
   group_by(sample) %>%
   summarise(intervention_cost = sum(intervention_cost, na.rm = TRUE), intervention_cost_discounted = sum(intervention_cost_discounted, na.rm = TRUE),
-            health_cost_int = sum(health_cost_int, na.rm = TRUE), heatlh_cost_int_discount = sum(heatlh_cost_int_discount, na.rm = TRUE), health_cost_con = sum(health_cost_con, na.rm = TRUE), health_cost_con_discount = sum(health_cost_con_discount, na.rm = TRUE))
+            health_cost_int = sum(health_cost_int, na.rm = TRUE), heatlh_cost_int_discount = sum(heatlh_cost_int_discount, na.rm = TRUE), health_cost_con = sum(health_cost_con, na.rm = TRUE), health_cost_con_discount = sum(health_cost_con_discount, na.rm = TRUE)) %>%
+  mutate(total_int_cost_discount = heatlh_cost_int_discount +  intervention_cost_discounted)
+
+t.test(costsAggregate$total_int_cost_discount, costsAggregate$health_cost_con_discount)
