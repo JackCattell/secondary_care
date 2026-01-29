@@ -1,10 +1,13 @@
 ## MARKOV MODEL SECONDARY CARE
 
 library(dplyr)
+library(future)
+library(future.apply)
+
 
 ## constants 
 
-samples <- 10
+samples <- 100
 cycles <- 12
 years <- 5
 people <- 170 
@@ -215,6 +218,46 @@ sampleChain <- function() {
   return(sample)
 }
 
+sampleChain_parallel <- function(
+    samples,
+    workers = NULL,
+    seed = TRUE,
+    packages = NULL,
+    globals = TRUE  # TRUE = auto-detect globals (usually enough)
+) {
+  stopifnot(is.numeric(samples), length(samples) == 1, samples >= 1)
+  
+  if (!is.null(workers)) {
+    future::plan(future::multisession, workers = workers)  # cross-platform
+  }
+  
+  out_list <- future.apply::future_lapply(
+    X = seq_len(samples),
+    FUN = function(i) {
+      
+      # your existing code unchanged
+      intervention <- one_sample("intervention")
+      intervention$type <- "intervention"
+      intervention$sample <- i
+      intervention <- addCosts(intervention)
+      
+      control <- one_sample("control")
+      control$type <- "control"
+      control$sample <- i
+      control <- addCosts(control)
+      
+      rbind(intervention, control)
+    },
+    future.seed = seed,
+    future.packages = packages,
+    future.globals = globals
+  )
+  
+  out <- do.call(rbind, out_list)
+  rownames(out) <- NULL
+  out
+}
+
 
 addCosts <- function(df) {
   setup <- setupCost()
@@ -245,16 +288,38 @@ addCosts <- function(df) {
 
 ## analysis
 
-df <- sampleChain()
+
+df <- sampleChain_parallel(
+  samples = samples,     # or a number like 1000
+  workers = parallel::detectCores() - 1 ,
+  seed = TRUE,
+  packages = NULL        # add c("dplyr") if your functions rely on it
+)
 df <- df[df$step != 0, ]
 df$year <- ceiling(as.numeric(df$step)/cycles)
 df[df$type == "control", ]$intervention_cost <- 0
 df$intervention_cost_discount <- df$intervention_cost * ((1 - discountRate) ^ (df$year - 1))
 df$health_cost_discount <- df$health_cost * ((1 - discountRate) ^ (df$year - 1))
 
-costsByYear <- df %>%
+costsByYearSample <- df %>%
               group_by(year, sample, type) %>%
-              summarise(health = sum(health_cost, na.rm = TRUE), intervention = sum(intervention_cost, na.rm = TRUE)) %>%
-              group_by(year, type) %>%
-              summarise(mean_intervention = mean(intervention, na.rm = TRUE), health_cost = mean(health, na.rm = TRUE))
-  
+              summarise(health = sum(health_cost, na.rm = TRUE), intervention = sum(intervention_cost, na.rm = TRUE))
+
+costsBySample <- df %>%
+  group_by(sample, type) %>%
+  summarise(health = sum(health_cost, na.rm = TRUE), intervention = sum(intervention_cost, na.rm = TRUE))
+
+hist(costsBySample[costsBySample$type=="intervention", ]$health, breaks = 10)
+
+costs <- merge(df[df$type == "intervention", c("sample", "year", "patient", "step", "intervention_cost", "intervention_cost_discount", "health_cost", "health_cost_discount")], 
+               df[df$type == "control", c("sample", "year", "patient", "step", "intervention_cost", "intervention_cost_discount", "health_cost", "health_cost_discount")], 
+               by = c("sample", "year", "patient", "step"))
+costs$intervention_cost.y <- NULL
+costs$intervention_cost_discount.y <- NULL
+
+names(costs) <- c("sample", "year", "patient", "step", "intervention_cost", "intervention_cost_discounted", "health_cost_int", "heatlh_cost_int_discount", "health_cost_con", "health_cost_con_discount" )
+
+costsAggregate <- costs %>%
+  group_by(sample) %>%
+  summarise(intervention_cost = sum(intervention_cost, na.rm = TRUE), intervention_cost_discounted = sum(intervention_cost_discounted, na.rm = TRUE),
+            health_cost_int = sum(health_cost_int, na.rm = TRUE), heatlh_cost_int_discount = sum(heatlh_cost_int_discount, na.rm = TRUE), health_cost_con = sum(health_cost_con, na.rm = TRUE), health_cost_con_discount = sum(health_cost_con_discount, na.rm = TRUE))
