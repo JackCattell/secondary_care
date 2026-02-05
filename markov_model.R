@@ -108,27 +108,41 @@ tempres_los <- function(type="intervention") {
 
 ## costs
 
-setupCost <- function() {
-  50 #add correct
+fixedCost <- function() {
+  194544.00/people# b&D costs final.xlsx
 }
+
+setupCost <- function() {
+  list(hardware=704.77, provider_incentive=110.37) # b&D costs final.xlsx
+}
+
+
 monthlyCost <- function() {
   
-  15 # add correct 
+  list(licences=23.75, tech_partner=16.04) # b&D costs final.xlsx
+
 }
+
 calloutCost <- function() {
-  100 ## add real 
+  100 # b&D costs final.xlsx
 }
+
 conveyanceCost <- function() {
-  100 ## add real
+  132 # b&D costs final.xlsx
 }
 aeCost <- function() {
-  100 #add real 
+  280.17 # b&D costs final.xlsx
 }
+
+admissionCost <- function() {
+  2711 # b&D costs final.xlsx
+}
+
 admissionDayCost <- function() {
-  100 ## add real
+  345 # b&D costs final.xlsx
 } 
 tempresDayCost <- function() {
-  100 ## add real 
+  161 ## add real 
 }
 
 ## functions 
