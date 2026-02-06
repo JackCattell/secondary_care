@@ -11,7 +11,7 @@ samples <- 100
 cycles <- 12
 years <- 5
 people <- 170 
-states <- c("home", "callout", "conveyance", "aeuse", "admission", "tempres", "death")
+states <- c("home", "callout", "ae_convey_noadmit", "ae_no_convey_noadmit", "admit_via_ae_convey", "admit_via_ae_no_convey", "admit_no_ae_convey", "admit_no_ae_no_convey", "tempres", "death")
 discountRate <- 0.035
 
 ## probabilities to sample 
@@ -21,14 +21,10 @@ discountRate <- 0.035
 
 # ambulance callout  
 
-amb_callout <- function(type= "intervention") {
-
-  if (type=="intervention") {
-    rbeta(1, 10, 160) ## add real 
-  } else (
-    rbeta(1, 17, 153) ## add real 
-  )
-  
+amb_callout <- function(type = "intervention", cycles = 12) {
+  monthlyRate <- 276 * 1.2 / (170 * cycles)
+  p <- 1 - exp(-monthlyRate)
+  return(p)
 }
 
 # ambulance conveyance 
@@ -36,35 +32,50 @@ amb_callout <- function(type= "intervention") {
 amb_conveyance <- function(type= "intervention") {
   
   if (type=="intervention") {
-    rbeta(1, 10, 160) ## add real 
-  } else (
-    rbeta(1, 17, 153) ## add real 
-  )
+   p <- rbeta(1, 158, 276 - 158)
+  } else {
+   p <-  rbeta(1, 70, 106 - 70)
+  }
   
+  return((p))
 }
 
 # A&E use
 
 ae_use <- function(type= "intervention") {
   
+  eventsPerYear = 2.729
+  eventsPerCycle = eventsPerYear/cycles
+  
   if (type=="intervention") {
-    rbeta(1, 10, 160) ## add real 
+    slopeMonthly =  rnorm(1, -0.6525, 0.1983) ## 
   } else (
-    rbeta(1, 17, 153) ## add real 
+    slopeMonthly =  rnorm(1, 0, 1) 
   )
   
+  meanRateRatio = exp(slopeMonthly)
+  cycleRate = eventsPerYear * meanRateRatio/cycles 
   
-}
+  return(1 - exp(-cycleRate)) ## Linden, A. (2015). Conducting Interrupted Time-Series Analysis for Single- and Multiple-Group Comparisons. Stata Journal, 15(2), 480–500.Briggs, A., Sculpher, M., Claxton, K., et al. (2012). Probabilistic Sensitivity Analysis: Statistical Assumptions and Methods.
+  
+} 
 
 # admit to hospital 
 
 hospital_admit <- function(type= "intervention") {
   
+  eventsPerYear = 2.088 + (384/170)
+
   if (type=="intervention") {
-    rbeta(1, 10, 160) ## add real 
+    slopeMonthly =  rnorm(1, -0.7215, 0.2193) ## 
   } else (
-    rbeta(1, 17, 153) ## add real 
+    slopeMonthly =  rnorm(1, 0, 1) 
   )
+  
+  meanRateRatio = exp(slopeMonthly)
+  cycleRate = eventsPerYear * meanRateRatio/cycles 
+  
+  return(1 - exp(-cycleRate)) ## Linden, A. (2015). Conducting Interrupted Time-Series Analysis for Single- and Multiple-Group Comparisons. Stata Journal, 15(2), 480–500.Briggs, A., Sculpher, M., Claxton, K., et al. (2012). Probabilistic Sensitivity Analysis: Statistical Assumptions and Methods.
   
 }
 
@@ -72,15 +83,15 @@ hospital_admit <- function(type= "intervention") {
 
 hospital_los <- function(type="intervention") {
   if (type == "intervention") {
-    rpois(1, 8 - 1) + 1 # add real 
+    rpois(1, 9.91 - 1) + 1 # add real 
   } else {
-    rpois(1, 9 - 1) + 1 # add real 
+    rpois(1, 10.3 - 1) + 1 # add real 
   }
 }
 
 
 death_rate <- function() {
-  0.017455
+  annual_to_monthly_prob((0.025484 + 0.036249)/2)
   ## 70 age simple av from https://www.ons.gov.uk/peoplepopulationandcommunity/birthsdeathsandmarriages/lifeexpectancies/datasets/mortalityratesqxbysingleyearofage#:~:text=Dataset%20Mortality%20rates%20(qx)%2C%20by%20single%20year,Contact:%20Demography%20team.%20*%2010%20December%202025.
 }
 
@@ -88,23 +99,23 @@ death_rate <- function() {
 tempres_prob <- function(type="intervention") {
   
   if (type=="intervention") {
-    rbeta(1, 5, 165) # add real 
+    p <- rbeta(1, 5, 165) # add real 
   } else {
-    rbeta(1, 6, 164) # add real 
+    p <- rbeta(1, 5, 165) # add real 
   }
   
+  return(annual_to_monthly_prob(p))
 }
 
 # temp residence length length of stay 
 
 tempres_los <- function(type="intervention") {
   if (type == "intervention") {
-    rpois(1, 8 - 1) + 1 # add real 
+    rpois(1, 78.5 - 1) + 1 # add real 
   } else {
-    rpois(1, 9 - 1) + 1 # add real 
+    rpois(1, 228	 - 1) + 1 # add real 
   }
 }
-
 
 ## costs
 
@@ -124,7 +135,7 @@ monthlyCost <- function() {
 }
 
 calloutCost <- function() {
-  100 # b&D costs final.xlsx
+  327 # b&D costs final.xlsx
 }
 
 conveyanceCost <- function() {
@@ -155,27 +166,80 @@ annual_to_monthly_prob <- function(p_annual) {
   1 - (1 - p_annual)^(1 / 12)
 }
 
+calc_buckets <- function(type = "intervention",
+                                    tol = 1e-12) {
+  
+  p_callout <- amb_callout(type)
+  p_convey <- amb_conveyance(type)
+  
+  callout_no_more <- p_callout * (1 - p_convey)
+  
+  rate_convey_no_ae <- rbeta(1, 170*0.05, 170*0.95)
+  adjust = 158 * 1.2 * (1 - rate_convey_no_ae) ## based on 158 over 10 months conveyances 
+  rate_convey_of_ae <- rbeta(1, adjust , 595 - (adjust)) ## based on 595 A&E attendances over 12 months 
+  
+  p_ae <- ae_use(type)
+  
+  p_convey_to_admit <- p_callout * p_convey * rate_convey_no_ae
+  
+  p_convey_ae <- min(p_ae * rate_convey_of_ae, (p_callout * p_convey) - p_convey_to_admit)
+  p_ae_no_convey <- p_ae - p_convey_ae 
+  
+  p_admit <- hospital_admit(type)
+  p_admit_via_ae <- p_admit * rbeta(1, 355, 384)
+  
+  p_admit_via_ae_convey <- p_admit_via_ae * (p_convey_ae/(p_convey_ae + p_ae_no_convey))
+  p_admit_via_ae_no_convey <- p_admit_via_ae - p_admit_via_ae_convey
+  p_admit_no_ae <- max(0, p_admit -  p_admit_via_ae - p_convey_to_admit)
+  
+  ## AMEND FOR NO ADMIT FROM AE 
+  p_convey_ae_notadmit = max(0, p_convey_ae - p_admit_via_ae_convey)
+  p_no_convey_ae_noadmit = max(0, p_ae_no_convey - p_admit_via_ae_no_convey)
+  
+  return(list(
+    p_callout = callout_no_more,
+    p_ae_convey_noadmit = p_convey_ae_notadmit,
+    p_ae_no_convey_noadmit = p_no_convey_ae_noadmit,
+    p_admit_via_ae_convey = p_admit_via_ae_convey,
+    p_admit_via_ae_no_convey = p_admit_via_ae_no_convey,
+    p_admit_no_ae_convey = p_convey_to_admit,
+    p_admit_no_ae_no_convey = p_admit_no_ae
+    
+    # 
+  ))
+  
+}
+
+
 transition_matrix <-function(type="intervention") {
   
-  callout <- annual_to_monthly_prob(amb_callout(type))
-  conveyance <- annual_to_monthly_prob(amb_conveyance(type))
-  ae <- annual_to_monthly_prob(ae_use(type))
-  admission <- annual_to_monthly_prob(hospital_admit(type))
-  tempres <- annual_to_monthly_prob(tempres_prob(type))
-  death  <- annual_to_monthly_prob(death_rate())
-  home <- 1 - callout - conveyance - ae - admission - tempres
+  probs <- calc_buckets()
+  
+  
+  tempres <- (tempres_prob(type))
+  death  <- (death_rate())
+  
+ # p_callout_only <- callout * (1 - conveyance)
+ # p_convey_total <- callout * conveyance
+  
+  home <- 1 - probs$p_callout - probs$p_ae_convey_noadmit - probs$p_ae_no_convey_noadmit - 
+    probs$p_admit_via_ae_convey - probs$p_admit_via_ae_no_convey - probs$p_admit_no_ae_convey - probs$p_admit_no_ae_no_convey -
+    tempres - death 
+
   
   tm <- matrix(nrow = length(states), ncol = length(states))
   colnames(tm) <- states
   rownames(tm) <- states 
   
-  probs <- c(home, callout, conveyance, ae, admission, tempres, death)
-  for (s in states[1:5]) {
+  probs <- c(home, probs$p_callout , probs$p_ae_convey_noadmit , probs$p_ae_no_convey_noadmit , 
+               probs$p_admit_via_ae_convey , probs$p_admit_via_ae_no_convey , probs$p_admit_no_ae_convey , probs$p_admit_no_ae_no_convey ,
+               tempres , death )
+  for (s in states[1:(length(states) - 2)]) {
     tm[s, ] <- probs
   } 
   
-  tm["tempres", ] <- c(1 - death, 0, 0, 0, 0 , 0, death)
-  tm['death', ] <- c(0, 0, 0, 0, 0, 0, 1)
+  tm["tempres", ] <- c(1 - death, 0, 0, 0, 0 , 0, 0, 0, 0 , death)
+  tm['death', ] <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
   
   return(tm)
 }
@@ -193,7 +257,7 @@ one_sample <- function(type) {
       probs <- probs/sum(probs)
       chain[j, "state"] <- sample(colnames(tm),1, prob = probs)
       
-      if (chain[j, "state"] == "admission") {
+      if (grepl("admit_", chain[j, "state"])) {
         chain[j, "admission_los"] = hospital_los(type)
       } else if (chain[j, "state"] == "tempres") {
         chain[j, "tempres_los"] = tempres_los(type)
