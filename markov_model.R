@@ -3,16 +3,23 @@
 library(dplyr)
 library(future)
 library(future.apply)
+library(foreach)
 
 
 ## constants 
 
-samples <- 100
+samples <- 10000
 cycles <- 12
 years <- 5
 people <- 170 
 states <- c("home", "callout", "ae_convey_noadmit", "ae_no_convey_noadmit", "admit_via_ae_convey", "admit_via_ae_no_convey", "admit_no_ae_convey", "admit_no_ae_no_convey", "tempres", "death")
 discountRate <- 0.035
+
+# --- Calibration ratios (multipliers) ---
+CAL_CALL_OUT   <- 1.131291261
+CAL_CONVEY     <- 1.032876847
+CAL_AE         <- 1.201096261
+CAL_ADMISSION  <- 1.119387811
 
 ## probabilities to sample 
 
@@ -22,10 +29,18 @@ discountRate <- 0.035
 # ambulance callout  
 
 amb_callout <- function(type = "intervention", cycles = 12) {
+  
+  # base monthly probability (as you had it)
   monthlyRate <- 276 * 1.2 / (170 * cycles)
-  p <- 1 - exp(-monthlyRate)
+  
+  # apply calibration
+  monthlyRate <- monthlyRate * CAL_CALL_OUT
+  
+  # clamp
+  p <- max(min(monthlyRate, 1), 0)
   return(p)
 }
+
 
 # ambulance conveyance 
 
@@ -40,44 +55,166 @@ amb_conveyance <- function(type= "intervention") {
   return((p))
 }
 
-# A&E use
 
-ae_use <- function(type= "intervention") {
+# A&E use
+# A&E use with shared intercept + baseline trend, plus group-specific post terms
+# A&E use with shared intercept + baseline trend.
+# Intervention uses its own post-intercept and post-slope.
+# Counterfactual ("control") uses control post terms REBASED to the intervention baseline
+# (so the implied absolute change at the control baseline is re-expressed on the intervention baseline).
+
+ae_use <- function(type = "intervention", cycles = 12) {
   
-  eventsPerYear = 2.729
-  eventsPerCycle = eventsPerYear/cycles
+  T <- cycles
   
-  if (type=="intervention") {
-    slopeMonthly =  rnorm(1, -0.6525, 0.1983) ## 
-  } else (
-    slopeMonthly =  rnorm(1, 0, 1) 
-  )
+  # --- shared baseline (from ITS) on log-count scale ---
+  alpha  <- 0.45788266   # Intercept
+  b_time <- 0.04071905   # Baseline trend (per month)
   
-  meanRateRatio = exp(slopeMonthly)
-  cycleRate = eventsPerYear * meanRateRatio/cycles 
+  # --- observed PRE totals over 12 months (for the population size in `people`) ---
+  pre_total_12m_int  <- 476
+  pre_total_12m_ctrl <- 345
   
-  return(1 - exp(-cycleRate)) ## Linden, A. (2015). Conducting Interrupted Time-Series Analysis for Single- and Multiple-Group Comparisons. Stata Journal, 15(2), 480–500.Briggs, A., Sculpher, M., Claxton, K., et al. (2012). Probabilistic Sensitivity Analysis: Statistical Assumptions and Methods.
+  pre_mean_month_int  <- pre_total_12m_int  / 12
+  pre_mean_month_ctrl <- pre_total_12m_ctrl / 12
   
-} 
+  # months relative to intervention point:
+  t_pre  <- -11:0
+  t_post <- 1:T
+  
+  # baseline predicted counts (shape) from intercept + baseline trend
+  mu_pre_shape  <- exp(alpha + b_time * t_pre)
+  mu_post_shape <- exp(alpha + b_time * t_post)
+  
+  # scale baseline so its PRE mean matches observed PRE mean for the INTERVENTION group
+  scale_k  <- pre_mean_month_int / mean(mu_pre_shape)
+  mu0_post <- scale_k * mu_post_shape  # shared baseline monthly counts post (on intervention baseline)
+  
+  # --- draw post terms (log-count scale) ---
+  if (type == "intervention") {
+    
+    b_post  <- rnorm(1, mean = 0.11493318, sd = 0.174)
+    b_slope <- rnorm(1, mean = -0.1003871, sd = 0.0305)
+    
+  } else {
+    
+    # draw control-group coefficients (as estimated on the control baseline)
+    b_post_ctrl  <- rnorm(1, mean = 0.02219856, sd = 0.176)
+    b_slope_ctrl <- rnorm(1, mean = -0.0589255, sd = 0.0229)
+    
+    # --- REBASE control post-intercept to intervention baseline ---
+    RR0_ctrl   <- exp(b_post_ctrl)
+    delta0     <- (RR0_ctrl - 1) * pre_mean_month_ctrl          # implied absolute change at control baseline
+    RR0_rebase <- 1 + delta0 / pre_mean_month_int               # re-expressed relative change at intervention baseline
+    RR0_rebase <- max(RR0_rebase, 1e-12)                        # guard against numerical issues
+    b_post     <- log(RR0_rebase)
+    
+    # --- REBASE control post-slope to intervention baseline (mean effect over 12 months) ---
+    # Interpret slope as an average effect over 12 months by using the mean multiplier across months 1..12,
+    # then re-express that absolute change on the intervention baseline, and convert back to a slope.
+    t12          <- 1:12
+    RR_slope_bar <- mean(exp(b_slope_ctrl * t12))               # average relative multiplier over 12 months (control baseline)
+    delta_slope  <- (RR_slope_bar - 1) * pre_mean_month_ctrl    # implied absolute change at control baseline
+    RR_s_rebase  <- 1 + delta_slope / pre_mean_month_int        # re-expressed relative change at intervention baseline
+    RR_s_rebase  <- max(RR_s_rebase, 1e-12)
+    
+    # Convert rebased average multiplier back to a per-month slope.
+    # Using 6.5 matches the mean month index over 1..12 (consistent with "average over 12 months").
+    b_slope <- log(RR_s_rebase) / 6.5
+  }
+  
+  # apply level + slope change over post months
+  mu1_post <- mu0_post * exp(b_post + b_slope * t_post)
+  
+  # mean monthly count over months 1..T
+  eventsPerMonth1 <- mean(mu1_post)
+  
+  # convert to per-person monthly probability (Bernoulli approximation) + calibration
+  p_month <- (eventsPerMonth1 * CAL_AE) / people
+  p_month <- max(min(p_month, 1), 0)
+  
+  return(p_month)
+}
+
 
 # admit to hospital 
 
-hospital_admit <- function(type= "intervention") {
-  
-  eventsPerYear = 2.088 + (384/170)
+# Emergency (non-elective) admissions — shared baseline anchored to the intervention pre total.
+# Intervention uses its own post-intercept and post-slope.
+# Counterfactual ("control") uses control post terms REBASED to the intervention baseline
+# (so the implied absolute change at the control baseline is re-expressed on the intervention baseline).
 
-  if (type=="intervention") {
-    slopeMonthly =  rnorm(1, -0.7215, 0.2193) ## 
-  } else (
-    slopeMonthly =  rnorm(1, 0, 1) 
-  )
+hospital_admit <- function(type = "intervention", cycles = 12) {
   
-  meanRateRatio = exp(slopeMonthly)
-  cycleRate = eventsPerYear * meanRateRatio/cycles 
+  T <- cycles
   
-  return(1 - exp(-cycleRate)) ## Linden, A. (2015). Conducting Interrupted Time-Series Analysis for Single- and Multiple-Group Comparisons. Stata Journal, 15(2), 480–500.Briggs, A., Sculpher, M., Claxton, K., et al. (2012). Probabilistic Sensitivity Analysis: Statistical Assumptions and Methods.
+  # --- shared baseline (from ITS) on log-count scale ---
+  alpha  <- 0.233   # Intercept
+  b_time <- 0.054   # Baseline trend (per month)
   
+  # --- observed PRE totals over 12 months (for the population size in `people`) ---
+  pre_total_12m_int  <- 296
+  pre_total_12m_ctrl <- 217
+  
+  pre_mean_month_int  <- pre_total_12m_int  / 12
+  pre_mean_month_ctrl <- pre_total_12m_ctrl / 12
+  
+  # time indices (relative to intervention point)
+  t_pre  <- -11:0
+  t_post <- 1:T
+  
+  # baseline predicted counts (shape) from intercept + baseline trend
+  mu_pre_shape  <- exp(alpha + b_time * t_pre)
+  mu_post_shape <- exp(alpha + b_time * t_post)
+  
+  # scale baseline so its PRE mean matches observed PRE mean for the INTERVENTION group
+  scale_k  <- pre_mean_month_int / mean(mu_pre_shape)
+  mu0_post <- scale_k * mu_post_shape  # shared baseline monthly counts post (on intervention baseline)
+  
+  # --- draw post terms (log-count scale) ---
+  if (type == "intervention") {
+    
+    b_post  <- rnorm(1, mean = -0.009, sd = 0.18)
+    b_slope <- rnorm(1, mean = -0.111, sd = 0.0337)
+    
+  } else {
+    
+    # draw control-group coefficients (as estimated on the control baseline)
+    b_post_ctrl  <- rnorm(1, mean =  0.026, sd = 0.148)
+    b_slope_ctrl <- rnorm(1, mean = -0.049, sd = 0.019)
+    
+    # --- REBASE control post-intercept to intervention baseline ---
+    RR0_ctrl   <- exp(b_post_ctrl)
+    delta0     <- (RR0_ctrl - 1) * pre_mean_month_ctrl          # implied absolute change at control baseline
+    RR0_rebase <- 1 + delta0 / pre_mean_month_int               # re-expressed relative change at intervention baseline
+    RR0_rebase <- max(RR0_rebase, 1e-12)                        # guard against numerical issues
+    b_post     <- log(RR0_rebase)
+    
+    # --- REBASE control post-slope to intervention baseline (mean effect over 12 months) ---
+    t12          <- 1:12
+    RR_slope_bar <- mean(exp(b_slope_ctrl * t12))               # average relative multiplier over 12 months (control baseline)
+    delta_slope  <- (RR_slope_bar - 1) * pre_mean_month_ctrl    # implied absolute change at control baseline
+    RR_s_rebase  <- 1 + delta_slope / pre_mean_month_int        # re-expressed relative change at intervention baseline
+    RR_s_rebase  <- max(RR_s_rebase, 1e-12)
+    
+    # Convert rebased average multiplier back to a per-month slope.
+    # Using 6.5 matches the mean month index over 1..12.
+    b_slope <- log(RR_s_rebase) / 6.5
+  }
+  
+  # apply level + slope change over post months
+  mu1_post <- mu0_post * exp(b_post + b_slope * t_post)
+  
+  # mean monthly count over months 1..T
+  eventsPerMonth1 <- mean(mu1_post)
+  
+  # convert to per-person monthly probability (Bernoulli approximation) + calibration
+  p_month <- (eventsPerMonth1 * CAL_ADMISSION) / people
+  p_month <- max(min(p_month, 1), 0)
+  
+  return(p_month)
 }
+
 
 # hospital length of stay 
 
@@ -90,9 +227,9 @@ hospital_los <- function(type="intervention") {
 }
 
 
-death_rate <- function() {
+death_rate <- function(year) {
   annual_to_monthly_prob((0.025484 + 0.036249)/2)
-  ## 70 age simple av from https://www.ons.gov.uk/peoplepopulationandcommunity/birthsdeathsandmarriages/lifeexpectancies/datasets/mortalityratesqxbysingleyearofage#:~:text=Dataset%20Mortality%20rates%20(qx)%2C%20by%20single%20year,Contact:%20Demography%20team.%20*%2010%20December%202025.
+  ## 79 age simple av from https://www.ons.gov.uk/peoplepopulationandcommunity/birthsdeathsandmarriages/lifeexpectancies/datasets/mortalityratesqxbysingleyearofage#:~:text=Dataset%20Mortality%20rates%20(qx)%2C%20by%20single%20year,Contact:%20Demography%20team.%20*%2010%20December%202025.
 }
 
 # temp residence probability 
@@ -135,14 +272,14 @@ monthlyCost <- function() {
 }
 
 calloutCost <- function() {
-  327 # b&D costs final.xlsx
+  327  # b&D costs final.xlsx
 }
 
 conveyanceCost <- function() {
   132 # b&D costs final.xlsx
 }
 aeCost <- function() {
-  280.17 # b&D costs final.xlsx
+  280.17  # b&D costs final.xlsx
 }
 
 admissionCost <- function() {
@@ -150,7 +287,7 @@ admissionCost <- function() {
 }
 
 admissionDayCost <- function() {
-  345 # b&D costs final.xlsx
+  345  # b&D costs final.xlsx
 } 
 tempresDayCost <- function() {
   161 ## add real 
@@ -169,27 +306,37 @@ annual_to_monthly_prob <- function(p_annual) {
 calc_buckets <- function(type = "intervention",
                                     tol = 1e-12) {
   
+  ## find prob callout and conveyance from callout
   p_callout <- amb_callout(type)
   p_convey <- amb_conveyance(type)
   
   callout_no_more <- p_callout * (1 - p_convey)
   
-  rate_convey_no_ae <- rbeta(1, 170*0.05, 170*0.95)
-  adjust = 158 * 1.2 * (1 - rate_convey_no_ae) ## based on 158 over 10 months conveyances 
+  ##estimate % that do not go to A&E from conveyance - small at 5%
+  rate_convey_no_ae <- rbeta(1, 190*0.05, 190*0.95)
+  adjust = 190 * (1 - rate_convey_no_ae) ## based on 158 over 10 months conveyances 
   rate_convey_of_ae <- rbeta(1, adjust , 595 - (adjust)) ## based on 595 A&E attendances over 12 months 
   
+  #draw prob ae 
   p_ae <- ae_use(type)
   
+  #find conveyance to admit probablity with no a&E
   p_convey_to_admit <- p_callout * p_convey * rate_convey_no_ae
   
+  ## adjust for convey to ae rate and no-convey 
   p_convey_ae <- min(p_ae * rate_convey_of_ae, (p_callout * p_convey) - p_convey_to_admit)
   p_ae_no_convey <- p_ae - p_convey_ae 
   
+  ## find admit probabilioty 
   p_admit <- hospital_admit(type)
-  p_admit_via_ae <- p_admit * rbeta(1, 355, 384)
+  ## find probailkity ae led to admit 
+  p_admit_via_ae <- p_admit * rbeta(1, 355, 240)
   
+  ## create admit from ae probs, conveyed and not conveyed. 
   p_admit_via_ae_convey <- p_admit_via_ae * (p_convey_ae/(p_convey_ae + p_ae_no_convey))
   p_admit_via_ae_no_convey <- p_admit_via_ae - p_admit_via_ae_convey
+  
+  #find prob for admitted but no a&E
   p_admit_no_ae <- max(0, p_admit -  p_admit_via_ae - p_convey_to_admit)
   
   ## AMEND FOR NO ADMIT FROM AE 
@@ -213,7 +360,19 @@ calc_buckets <- function(type = "intervention",
 
 transition_matrix <-function(type="intervention") {
   
-  probs <- calc_buckets()
+  max_tries <- 1000
+  i <- 1
+  
+  repeat {
+    probs <- calc_buckets(type)
+    
+    if (all(probs >= 0)) break
+    
+    i <- i + 1
+    if (i > max_tries) {
+      stop("calc_buckets kept producing negative probabilities")
+    }
+  }
   
   
   tempres <- (tempres_prob(type))
@@ -273,30 +432,68 @@ one_sample <- function(type) {
   return(sample)
 }
 
-sampleChain <- function() {
+sampleChain <- function(max_retries = 5) {
   
   sample <- data.frame()
   
+  start <- Sys.time()
+  
   for (i in 1:samples) {
     
-    intervention <- one_sample("intervention")
-    intervention$type <- "intervention"
-    intervention$sample <- i
-    intervention <- addCosts(intervention)
+    attempt <- 1
+    success <- FALSE
     
-    control <- one_sample("control")
-    control$type <- "control"
-    control$sample <- i
-    control <- addCosts(control)
+    while (!success && attempt <= max_retries) {
+      
+      res_i <- tryCatch(
+        {
+          intervention <- one_sample("intervention")
+          intervention$type <- "intervention"
+          intervention$sample <- i
+          intervention <- addCosts(intervention)
+          
+          control <- one_sample("control")
+          control$type <- "control"
+          control$sample <- i
+          control <- addCosts(control)
+          
+          list(intervention = intervention, control = control)
+        },
+        error = function(e) {
+          message(
+            "Iteration ", i,
+            " failed on attempt ", attempt,
+            ": ", conditionMessage(e)
+          )
+          NULL
+        }
+      )
+      
+      if (!is.null(res_i)) {
+        sample <- rbind(sample, res_i$intervention)
+        sample <- rbind(sample, res_i$control)
+        success <- TRUE
+        message("Done ", i)
+      } else {
+        attempt <- attempt + 1
+      }
+    }
     
-    sample <- rbind(sample, intervention)
-    sample <- rbind(sample, control)
+  
+    if (!success) {
+      warning("Iteration ", i, " failed after ", max_retries, " attempts — skipping.")
+    }
     
+    if (i %% 50 == 0) {
+      time <- Sys.time() - start
+      message("Seconds elapsed", time)
+      message("Average per sample", round(time/i, 1))
+      message("Time left seconds: ", (time/i) * (samples - i) )
+    }
   }
   
   return(sample)
 }
-
 sampleChain_parallel <- function(
     samples,
     workers = NULL,
@@ -313,7 +510,7 @@ sampleChain_parallel <- function(
   out_list <- future.apply::future_lapply(
     X = seq_len(samples),
     FUN = function(i) {
-      
+    
       # your existing code unchanged
       intervention <- one_sample("intervention")
       intervention$type <- "intervention"
@@ -324,6 +521,11 @@ sampleChain_parallel <- function(
       control$type <- "control"
       control$sample <- i
       control <- addCosts(control)
+      
+      writeLines(
+        as.character(i),
+        file.path("progress", paste0("done-", i, ".txt"))
+      )
       
       rbind(intervention, control)
     },
@@ -338,25 +540,89 @@ sampleChain_parallel <- function(
 }
 
 
+sampleChain_foreach <- function(samples, workers = parallel::detectCores() - 1) {
+  stopifnot(samples >= 1)
+  
+  cl <- parallel::makeCluster(workers)
+  on.exit(parallel::stopCluster(cl), add = TRUE)
+  doParallel::registerDoParallel(cl)
+  value_names <- names(Filter(
+    Negate(is.function),
+    as.list(.GlobalEnv)
+  ))
+  fn_names <- names(Filter(is.function, as.list(.GlobalEnv)))
+  
+  # export only what you need (be explicit)
+  parallel::clusterExport(cl, varlist = c(fn_names, value_names), envir = environment())
+  
+  res <- foreach::foreach(
+    i = seq_len(samples),
+    .combine = "rbind",
+    .packages = c("dplyr")  # add any you truly need inside one_sample/addCosts
+  ) %dopar% {
+    # If you need reproducibility across workers:
+    # doRNG::%dorng% and set.seed() once outside (see note below)
+    
+    intervention <- one_sample("intervention")
+    intervention$type <- "intervention"
+    intervention$sample <- i
+    intervention <- addCosts(intervention)
+    
+    control <- one_sample("control")
+    control$type <- "control"
+    control$sample <- i
+    control <- addCosts(control)
+    
+    rbind(intervention, control)
+    
+    writeLines(
+      as.character(i),
+      file.path("progress", paste0("done-", i, ".txt"))
+    )
+  }
+  
+  rownames(res) <- NULL
+  res
+}
+
 addCosts <- function(df) {
+  fixed <- fixedCost()
   setup <- setupCost()
   monthly <- monthlyCost()
   callout <- calloutCost()
   conveyance <- conveyanceCost()
   ae <- aeCost()
+  admission <- admissionCost()
   admissionDay <- admissionDayCost()
   tempres <- tempresDayCost()
   
-  df$intervention_cost <- ifelse(
-    df$step == 1, setup + monthly, monthly
+  df$fixed_cost <- ifelse(
+    df$step == 1, fixed, 0
   )
+  
+  df$setup_hardware <- ifelse(
+    df$step == 1, setup$hardware, 0
+  )
+  
+  df$setup_provider_incentive <- ifelse(
+    df$step %in% c(1, 13, 25, 37, 49), setup$provider_incentive, 0
+  )
+  
+  df$monthly_licence_cost <- monthly$licences
+  df$monthly_tech_partner <- monthly$tech_partner
   
   df$health_cost <- ifelse(
     df$state == "callout", callout, ifelse(
-      df$state == "conveyance", callout + conveyance, ifelse(
-        df$state == "aeuse", callout + conveyance + ae, ifelse(
-          df$state == "admission", callout + conveyance + ae + (as.numeric(df$admission_los) * admissionDay), ifelse(
-            df$state == "tempres", as.numeric(df$tempres_los) * tempres, 0
+      df$state == "ae_convey_noadmit", callout + conveyance + ae, ifelse(
+        df$state == "ae_no_convey_noadmit",ae, ifelse(
+          df$state == "admit_via_ae_convey", callout + conveyance + ae + admission + (as.numeric(df$admission_los) * admissionDay), ifelse(
+            df$state == "admit_via_ae_no_convey", ae + admission + (as.numeric(df$admission_los) * admissionDay), ifelse(
+              df$state == "admit_no_ae_convey", callout + conveyance + admission + (as.numeric(df$admission_los) * admissionDay), ifelse(
+                df$state == "admit_no_ae_no_convey", admission + (as.numeric(df$admission_los) * admissionDay), ifelse(
+                  df$state == "tempres", as.numeric(df$tempres_los) * tempres, 0
+                )
+              )
+            )
           )
         )
       )
@@ -365,43 +631,164 @@ addCosts <- function(df) {
   return(df)
 }
 
+##states <- c("home", "callout", "ae_convey_noadmit", "ae_no_convey_noadmit", "admit_via_ae_convey", "admit_via_ae_no_convey", "admit_no_ae_convey", "admit_no_ae_no_convey", "tempres", "death")
+
+discount <- function(df, colname) {
+  df[, colname] * ((1 - discountRate) ^ (df$year - 1))
+}
+
 ## analysis
 
+#future::plan(future::multisession, workers = 10)
+#future::plan()
+#future::nbrOfWorkers()
 
-df <- sampleChain_parallel(
-  samples = samples,     # or a number like 1000
-  workers = parallel::detectCores() - 1 ,
-  seed = TRUE,
-  packages = NULL        # add c("dplyr") if your functions rely on it
-)
+#options(future.debug = TRUE)
+
+start <- Sys.time()
+
+s <- one_sample("intervention")
+
+Sys.time() - start 
+
+dir.create("progress", showWarnings = FALSE)
+
+
+#df <- sampleChain_parallel(
+  #samples = samples,    
+  #seed = TRUE,
+  #packages = NULL        
+#)
+
+df <- sampleChain_foreach(samples)
+
+#df <- sampleChain()
+
+save.image("results.Rdata")
+
 df <- df[df$step != 0, ]
 df$year <- ceiling(as.numeric(df$step)/cycles)
-df[df$type == "control", ]$intervention_cost <- 0
-df$intervention_cost_discount <- df$intervention_cost * ((1 - discountRate) ^ (df$year - 1))
-df$health_cost_discount <- df$health_cost * ((1 - discountRate) ^ (df$year - 1))
+
+df$fixed_cost_discount <- discount(df, "fixed_cost")
+df$health_cost_discount <- discount(df, "health_cost")
+
+df$setup_hardware_cost_discount <- discount(df, "setup_hardware")
+df$setup_provider_incentive_cost_discount <- discount(df, "setup_provider_incentive")
+
+df$monthly_licence_cost_discount <- discount(df, "monthly_licence_cost")
+df$monthly_tech_partner_cost_discount <- discount(df, "monthly_tech_partner")
+
+eventsByYearSample <- df %>% 
+  group_by(sample, year, type, state) %>%
+  summarise(freq = n())
+             
+write.csv(eventsByYearSample, "events.csv", row.names = FALSE)
+
 
 costsByYearSample <- df %>%
-              group_by(year, sample, type) %>%
-              summarise(health = sum(health_cost, na.rm = TRUE), intervention = sum(intervention_cost, na.rm = TRUE))
+  group_by(year, sample, type) %>%
+  summarise(
+    # undiscounted
+    "fixed_cost" = sum(fixed_cost, na.rm = TRUE),
+    "health_cost" = sum(health_cost, na.rm = TRUE),
+    "setup_hardware" = sum(setup_hardware, na.rm = TRUE),
+    "setup_provider_incentive" = sum(setup_provider_incentive, na.rm = TRUE),
+    "monthly_licence" = sum(monthly_licence_cost, na.rm = TRUE),
+    "monthly_tech_partner" = sum(monthly_tech_partner, na.rm = TRUE),
+
+    # discounted
+    "fixed_cost_discount" = sum(fixed_cost_discount, na.rm = TRUE),
+    "health_cost_discount" = sum(health_cost_discount, na.rm = TRUE),
+    "setup_hardware_cost_discount" = sum(setup_hardware_cost_discount, na.rm = TRUE),
+    "setup_provider_incentive_cost_discount" = sum(setup_provider_incentive_cost_discount, na.rm = TRUE),
+    "monthly_licence_cost_discount" = sum(monthly_licence_cost_discount, na.rm = TRUE),
+    "monthly_tech_partner_cost_discount" = sum(monthly_tech_partner_cost_discount, na.rm = TRUE),
+
+    "total_difference_discount" = sum(fixed_cost_discount + setup_hardware_cost_discount + setup_provider_incentive_cost_discount +
+                                               monthly_licence_cost_discount + monthly_tech_partner_cost_discount, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write.csv(costsByYearSample, "costs.csv", row.names = FALSE )
 
 costsBySample <- df %>%
   group_by(sample, type) %>%
-  summarise(health = sum(health_cost, na.rm = TRUE), intervention = sum(intervention_cost, na.rm = TRUE))
+  summarise(
+    # undiscounted
+    "fixed_cost" = sum(fixed_cost, na.rm = TRUE),
+    "health_cost" = sum(health_cost, na.rm = TRUE),
+    "setup_hardware" = sum(setup_hardware, na.rm = TRUE),
+    "setup_provider_incentive" = sum(setup_provider_incentive, na.rm = TRUE),
+    "monthly_licence" = sum(monthly_licence_cost, na.rm = TRUE),
+    "monthly_tech_partner" = sum(monthly_tech_partner, na.rm = TRUE),
+    
+    # discounted
+    "fixed_cost_discount" = sum(fixed_cost_discount, na.rm = TRUE),
+    "health_cost_discount" = sum(health_cost_discount, na.rm = TRUE),
+    "setup_hardware_cost_discount" = sum(setup_hardware_cost_discount, na.rm = TRUE),
+    "setup_provider_incentive_cost_discount" = sum(setup_provider_incentive_cost_discount, na.rm = TRUE),
+    "monthly_licence_cost_discount" = sum(monthly_licence_cost_discount, na.rm = TRUE),
+    "monthly_tech_partner_cost_discount" = sum(monthly_tech_partner_cost_discount, na.rm = TRUE)
+    .groups = "drop"
+  )
 
-hist(costsBySample[costsBySample$type=="intervention", ]$health, breaks = 10)
 
-costs <- merge(df[df$type == "intervention", c("sample", "year", "patient", "step", "intervention_cost", "intervention_cost_discount", "health_cost", "health_cost_discount")], 
-               df[df$type == "control", c("sample", "year", "patient", "step", "intervention_cost", "intervention_cost_discount", "health_cost", "health_cost_discount")], 
-               by = c("sample", "year", "patient", "step"))
-costs$intervention_cost.y <- NULL
-costs$intervention_cost_discount.y <- NULL
+hist(costsBySample[costsBySample$type=="intervention", ]$health_cost_discount, breaks = 10)
 
-names(costs) <- c("sample", "year", "patient", "step", "intervention_cost", "intervention_cost_discounted", "health_cost_int", "heatlh_cost_int_discount", "health_cost_con", "health_cost_con_discount" )
+costs <- merge(costsByYearSample[costsByYearSample$type == "intervention", c("sample", "year", "total_intervention_cost_discount", "health_cost_discount")], 
+               costsByYearSample[costsByYearSample$type == "control", c("sample", "year", "health_cost_discount")], 
+                by = c("sample", "year")) 
 
-costsAggregate <- costs %>%
-  group_by(sample) %>%
-  summarise(intervention_cost = sum(intervention_cost, na.rm = TRUE), intervention_cost_discounted = sum(intervention_cost_discounted, na.rm = TRUE),
-            health_cost_int = sum(health_cost_int, na.rm = TRUE), heatlh_cost_int_discount = sum(heatlh_cost_int_discount, na.rm = TRUE), health_cost_con = sum(health_cost_con, na.rm = TRUE), health_cost_con_discount = sum(health_cost_con_discount, na.rm = TRUE)) %>%
-  mutate(total_int_cost_discount = heatlh_cost_int_discount +  intervention_cost_discounted)
+names(costs) <- c("sample", "year", "total_intervention_cost_discount_int", "health_cost_discount_int", "health_cost_discount_con")
 
-t.test(costsAggregate$total_int_cost_discount, costsAggregate$health_cost_con_discount)
+costs <- costs %>%
+  mutate(difference = health_cost_discount_con - health_cost_discount_int)
+
+
+costsCI <- costs %>%
+  group_by(year) %>%
+  summarise(difference_LCI = quantile(difference, 0.025, na.rm = TRUE ) ,
+            difference_UCI = quantile(difference, 0.975, na.rm = TRUE ))
+
+
+hist(
+  costs$difference,
+  breaks = seq(
+    min(costs$difference, na.rm = TRUE),
+    max(costs$difference, na.rm = TRUE),
+    length.out = 31
+  ),
+  xaxt = "n",          # suppress default x-axis
+  xlab = "Health benefit (£)"
+)
+
+axis(
+  1,
+  labels = scales::label_dollar(prefix = "£")(axTicks(1)),
+  at = axTicks(1)
+)
+
+costs_sample <- costs %>%
+  group_by(sample, year = 1) %>%
+  summarise(total_intervention_cost_discount_int = sum(total_intervention_cost_discount_int, na.rm = TRUE), 
+            health_cost_discount_int = sum(health_cost_discount_int, na.rm = TRUE),
+            health_cost_discount_con = sum(health_cost_discount_con, na.rm = TRUE))
+
+write.csv(costs_sample, "costs_sample.csv", row.names = FALSE)
+
+write.csv(costsCI, "costsCI.csv", row.names = FALSE)
+
+costsBySample <- costsBySample %>%
+  mutate(intervention_cost_discount = fixed_cost_discount + setup_hardware_cost_discount + setup_provider_incentive_cost_discount + 
+           monthly_licence_cost_discount + monthly_tech_partner_cost_discount) %>%
+  mutate(intervention_cost_discount = ifelse(type == "control", 0, intervention_cost_discount)) %>%
+  mutate(difference_discounted = health_cost_discount - intervention_cost_discount) %>%
+  arrange( sample, type) %>%
+  mutate(benefit = ifelse(type == "control", NA, lag(difference_discounted, 1) - difference_discounted)) %>%
+  mutate(bcr = benefit / intervention_cost_discount)
+
+t.test(costsBySample[costsBySample$type == "intervention", ]$bcr)
+
+averageCosts <- costsBySample %>%
+  group_by(type) %>%
+  summarise(fixed_cost_discount = )
