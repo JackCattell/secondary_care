@@ -8,7 +8,7 @@ library(foreach)
 
 ## constants 
 
-samples <- 1000
+samples <- 10000
 cycles <- 12
 years <- 3
 people <- 170 
@@ -18,10 +18,12 @@ mean_period <- 12
 attribution_adjust <- 0.66
 
 # --- Calibration ratios (multipliers) ---
-CAL_CALL_OUT   <- 1 #1.131291261
-CAL_CONVEY     <- 1 # 1.032876847
-CAL_AE         <-  1 # 1.201096261
-CAL_ADMISSION  <- 1 # 1.119387811
+CAL_CALL_OUT   <- 0.988979845 #1.131291261
+CAL_CONVEY     <- 0.860137571 # 1.032876847
+CAL_AE         <-  0.978180929 # 1.201096261
+CAL_ADMISSION  <- 0.842944088 # 1.119387811
+
+
 
 ## probabilities to sample 
 
@@ -265,22 +267,22 @@ monthlyCost <- function() {
 }
 
 calloutCost <- function() {
-  327  # b&D costs final.xlsx
+  327 * 1.6841  # b&D costs final.xlsx
 }
 
 conveyanceCost <- function() {
-  132 # b&D costs final.xlsx
+  132 * 1.6841 # b&D costs final.xlsx
 }
 aeCost <- function() {
-  280.17  # b&D costs final.xlsx
+  280.17 * 1.150482  # b&D costs final.xlsx
 }
 
 admissionCost <- function() {
- 0 # 792 # b&D costs final.xlsx
+ 0 * 1.150482 # 792 # b&D costs final.xlsx
 }
 
 admissionDayCost <- function() {
-  345  # b&D costs final.xlsx
+  345 * 1.150482  # b&D costs final.xlsx
 } 
 tempresDayCost <- function() {
   161 ## add real 
@@ -375,7 +377,8 @@ calc_buckets <- function(type = "intervention",
   p_admit_no_ae          <- admit_components[4]
   
   return(list(
-    p_callout = callout_no_more,
+    p_callout_drawn = p_callout,
+    p_callout = p_callout - p_convey_ae_notadmit - p_admit_via_ae_convey - p_convey_to_admit,
     p_ae_convey_noadmit = p_convey_ae_notadmit,
     p_ae_no_convey_noadmit = p_no_convey_ae_noadmit,
     p_admit_via_ae_convey = p_admit_via_ae_convey,
@@ -717,7 +720,7 @@ df <- sampleChain_foreach(samples)
 
 #df <- sampleChain()
 
-save.image("results_attadjusy0.66.Rdata")
+save.image("F:\\EBD\\secondary care\\results_attadjust0.66.Rdata")
 
 #df <- df[df$step != 0, ]
 #df$year <- ceiling(as.numeric(df$step)/cycles)
