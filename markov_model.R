@@ -740,6 +740,12 @@ eventsByYearSample <- df %>%
              
 write.csv(eventsByYearSample, "events.csv", row.names = FALSE)
 
+cost_check <- df %>%
+  filter(year == 1) %>%
+  group_by(state) %>%
+  summarise(weighted_cost = sum(health_cost, na.rm = TRUE), freq = sum(freq, na.rm = TRUE)) %>%
+  mutate(avg_cost = weighted_cost/freq)
+
 
 costsByYearSample <- df %>%
   group_by(year, sample, type) %>%
