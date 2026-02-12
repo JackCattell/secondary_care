@@ -15,7 +15,7 @@ people <- 170
 states <- c("home", "callout", "ae_convey_noadmit", "ae_no_convey_noadmit", "admit_via_ae_convey", "admit_via_ae_no_convey", "admit_no_ae_convey", "admit_no_ae_no_convey", "tempres", "death")
 discountRate <- 0.035
 mean_period <- 12
-attribution_adjust <- 0.66
+attribution_adjust <- 1
 
 # --- Calibration ratios (multipliers) ---
 CAL_CALL_OUT   <- 0.988979845 #1.131291261
@@ -115,10 +115,17 @@ ae_use <- function(type = "intervention", cycles = 12, sa = "") {
   }
   
   if (type == "intervention") {
-    attrib <- rnorm(1, mean = attribution_adjust, sd = 0.15)
-    attrib <- max(min(attrib, 1), 0)
-    full_effect <- exp(b_post + (b_slope * t_post))
-    adj_effect  <- 1 + attrib * (full_effect - 1)
+    if (attribution_adjust != 1) {
+      attrib <- rnorm(1, mean = attribution_adjust, sd = 0.15)
+      attrib <- max(min(attrib, 1), 0)
+      attrib <- rnorm(1, mean = attribution_adjust, sd = 0.15)
+      attrib <- max(min(attrib, 1), 0)
+      full_effect <- exp(b_post + (b_slope * t_post))
+      adj_effect  <- 1 + attrib * (full_effect - 1)
+    } else {
+      adj_effect <- 1
+    }
+    
     mu1_post    <- mu0_post * adj_effect
   } else {
     mu1_post <- mu0_post * exp(b_post + b_slope * t_post)
@@ -720,7 +727,7 @@ df <- sampleChain_foreach(samples)
 
 #df <- sampleChain()
 
-save.image("F:\\EBD\\secondary care\\results_attadjust0.66.Rdata")
+save.image("F:\\EBD\\secondary care\\results_attadjust1.Rdata")
 
 #df <- df[df$step != 0, ]
 #df$year <- ceiling(as.numeric(df$step)/cycles)
